@@ -7,9 +7,14 @@ Benchmark, aggregate, and display function performance in CPU cycles.
 * Display data in tables on the command line.
 
 - [ben](#ben)
+  - [Examples](#examples)
   - [Example statistics](#example-statistics)
     - [array vs vector](#array-vs-vector)
     - [match vs array](#match-vs-array)
+
+## Examples
+
+See [mtr](https://github.com/rana/mtr) for example benchmarks, queries and code.
 
 ## Example statistics
 
