@@ -74,6 +74,7 @@ where
         let overhead = overhead_cpu_cyc();
         for _ in 0..ITR_CNT {
             // Avoid compiler over-optimization by using `tmps[0] = f()`.
+            // Assigning to an array index avoid over-optimization.
             // Avoid using `black_box(f())`.
             // `black_box(f())` panics with large stack allocations.
             // `black_box(f())` does not release memory on the stack.
@@ -190,6 +191,11 @@ where
                 Some(qry)
             }
         }
+    }
+
+    /// `TODO`
+    pub fn qry_compare() {
+
     }
 }
 
@@ -342,18 +348,18 @@ where
         }
     }
 
-    /// `dat_lbl_vals` returns a new Dat for labels matching the specified `srch` label.
+    /// `dat_lbls` returns a new Dat of labels matching the specified `srch` label.
     ///
     /// Append additional labels with `apnd`.
     ///
     /// Useful for struct labels like `Len(u32)`.
-    pub fn dat_lbl_vals(&self, srch: L, apnd: &[L]) -> Option<Dat<L>> {
+    pub fn dat_lbls(&self, srch: L, apnd: &[L]) -> Option<Dat<L>> {
         Some(Dat::new(apnd, self.lbl_vals(srch)?))
     }
 
     /// `ins_dat_lbls` inserts a new Dat of labels matching the specified `srch` label.
     pub fn ins_dat_lbls(&self, srch: L, apnd: &[L]) -> Option<&'stdy Dat<L>> {
-        match self.dat_lbl_vals(srch, apnd) {
+        match self.dat_lbls(srch, apnd) {
             None => None,
             Some(dat) => Some(self.stdy.ins(dat)),
         }
