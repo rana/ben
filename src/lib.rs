@@ -7,6 +7,7 @@
 
 use comfy_table::Cell;
 use core::arch::x86_64;
+use std::hint::black_box;
 use itertools::join;
 use std::cell::UnsafeCell;
 use std::collections::hash_map::DefaultHasher;
@@ -642,14 +643,14 @@ pub fn overhead_cpu_cyc() -> u64 {
     overhead
 }
 
-#[inline]
-pub fn black_box<T>(v: T) -> T {
-    unsafe {
-        let ret = std::ptr::read_volatile(&v);
-        std::mem::forget(v);
-        ret
-    }
-}
+// #[inline]
+// pub fn black_box<T>(v: T) -> T {
+//     unsafe {
+//         let ret = std::ptr::read_volatile(&v);
+//         std::mem::forget(v);
+//         ret
+//     }
+// }
 
 /// Formats a `64` with `,`.
 pub fn fmt_u64(v: u64) -> String {
