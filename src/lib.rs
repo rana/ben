@@ -79,10 +79,8 @@ where
             // `black_box(f())` panics with large stack allocations.
             // `black_box(f())` does not release memory on the stack.
             let fst = fst_cpu_cyc();
-            // tmps[0] = f();
-            let val = black_box(f());
+            tmps[0] = f();
             vals.push(lst_cpu_cyc() - fst - overhead);
-            drop(black_box(val));
         }
 
         // Associate study labels
