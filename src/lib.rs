@@ -8,7 +8,6 @@
 use comfy_table::Cell;
 use core::arch::x86_64;
 use itertools::join;
-use num_format::{Locale, ToFormattedString};
 use std::cell::UnsafeCell;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
@@ -505,7 +504,7 @@ where
     pub fn vals_row(&self) -> Vec<Cell> {
         self.vals
             .iter()
-            .map(|x| Cell::new(x.to_formatted_string(&Locale::en)))
+            .map(|x| Cell::new(fmt_u64(*x)))
             .collect::<Vec<Cell>>()
     }
 
@@ -517,7 +516,7 @@ where
         let mut ret = prpnd.iter().map(Cell::new).collect::<Vec<Cell>>();
 
         ret = self.vals.iter().fold(ret, |mut ret, x| {
-            ret.push(Cell::new(x.to_formatted_string(&Locale::en)));
+            ret.push(Cell::new(fmt_u64(*x)));
             ret
         });
 
@@ -529,7 +528,7 @@ where
         let mut ret = self
             .vals
             .iter()
-            .map(|x| Cell::new(x.to_formatted_string(&Locale::en)))
+            .map(|x| Cell::new(fmt_u64(*x)))
             .collect::<Vec<Cell>>();
 
         ret.extend(apnd.iter().map(Cell::new));
@@ -633,6 +632,18 @@ pub fn black_box<T>(v: T) -> T {
         ret
     }
 }
+
+/// Formats a `64` with `,`.
+pub fn fmt_u64(v: u64) -> String {
+    let mut s = v.to_string();
+    let mut idx = s.len().saturating_sub(3);
+    while idx > 0 {
+        s.insert(idx, ',');
+        idx = idx.saturating_sub(3);
+    }
+    s
+}
+
 
 /// Returns an enum's struct value.
 ///
