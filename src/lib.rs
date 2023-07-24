@@ -70,7 +70,7 @@ where
     {
         // Record how many CPU cycles it takes to run the function
         let mut vals = Vec::with_capacity(ITR_CNT);
-        let mut tmps = vec![f()]; // warm up cycle not measured
+        // let mut tmps = vec![f()]; // warm up cycle not measured
         let overhead = overhead_cpu_cyc();
         for _ in 0..ITR_CNT {
             // Avoid compiler over-optimization by using `tmps = vec![f()]`, `tmps[0] = f()`.
@@ -79,8 +79,10 @@ where
             // `black_box(f())` panics with large stack allocations.
             // `black_box(f())` does not release memory on the stack.
             let fst = fst_cpu_cyc();
-            tmps[0] = f();
+            // tmps[0] = f();
+            let val = black_box(f());
             vals.push(lst_cpu_cyc() - fst - overhead);
+            drop(black_box(val));
         }
 
         // Associate study labels
@@ -623,6 +625,15 @@ pub fn overhead_cpu_cyc() -> u64 {
     fst = fst_cpu_cyc();
     overhead = overhead.min(lst_cpu_cyc() - fst);
     overhead
+}
+
+#[inline]
+pub fn black_box<T>(v: T) -> T {
+    unsafe {
+        let ret = std::ptr::read_volatile(&v);
+        std::mem::forget(v);
+        ret
+    }
 }
 
 /// Returns an enum's struct value.
