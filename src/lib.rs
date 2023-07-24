@@ -70,11 +70,11 @@ where
         // Record how many CPU cycles it takes to run the function
         let mut vals = Vec::with_capacity(ITR_CNT);
         let mut tmps = vec![f()]; // warm up cycle not measured
-        let mut ben = Ben {
-            otr: || {
-                tmps[0] = f();
-            },
-        };
+        // let mut ben = Ben {
+        //     otr: || {
+        //         tmps[0] = f();
+        //     },
+        // };
         let overhead = overhead_cpu_cyc();
         for _ in 0..ITR_CNT {
             // Avoid compiler over-optimization by using `tmps = vec![f()]`, `tmps[0] = f()`.
@@ -83,8 +83,8 @@ where
             // `black_box(f())` panics with large stack allocations.
             // `black_box(f())` does not release memory on the stack.
             let fst = fst_cpu_cyc();
-            // tmps[0] = f();
-            ben.run();
+            tmps[0] = f();
+            // ben.run();
             vals.push(lst_cpu_cyc() - fst - overhead);
         }
 
