@@ -19,7 +19,7 @@ Benchmarking for functions.
 
 ## Examples from the `mtr` project
 
-See the [mtr](https://github.com/rana/mtr) for example benchmarks, queries and code.
+See [mtr](https://github.com/rana/mtr) for example benchmarks, queries and code.
 
 ### allocation: array vs vector macro
 ```sh
