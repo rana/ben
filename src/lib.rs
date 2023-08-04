@@ -2,9 +2,9 @@
 //!
 //! * Measure function times in CPU cycles.
 //! * Query benchmarks with user-defined labels.
-//! * Aggregate and analyze function statistics.
+//! * Aggregate and compare function statistics.
 //! * Display data in command-line tables.
-//! * Query benchmarks at the command-line.
+//! * Query benchmarks from the command-line.
 
 #![allow(clippy::borrowed_box)]
 
