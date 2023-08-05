@@ -37,11 +37,11 @@ pub struct Cli {
         required = true
     )]
     frm: Vec<String>,
-    /// Group benchmarks into one or more labels. Each label is a group
+    /// Group benchmarks into one or more labels. Each label, or label set, is a group
     #[arg(
         short,
         long,
-        value_name = "lbl",
+        value_names = ["lbl", "lbl-lbl"],
         num_args = 1..,
         value_delimiter = ','
     )]
@@ -109,8 +109,8 @@ impl Cli {
                     }
                     Some(grp_lbl_strs) => {
                         // Group benchmark results.
-                        let grp_lbls = Lbls::try_from(grp_lbl_strs)?;
-                        let grps = run.grp(&grp_lbls)?;
+                        let grp_lbls = lbls_try_from(grp_lbl_strs)?;
+                        let grps = run.grp(&grp_lbls, &self.srt)?;
                         self.dbg.then(|| println!("{:?}", grps));
 
                         match &self.trn {
@@ -320,8 +320,8 @@ where
         }
 
         // Gather matched benchmark ids.
-        // Find which benchmark ids are within each label list.
         // Intersect the id across each list for a match.
+        // Find which benchmark ids are within each label list.
         let mut matched_ids: Vec<u16> = Vec::new();
         let mut matching_lbl_set = qry_lbl_ids[0].clone();
         for qry_lbl_set in qry_lbl_ids.into_iter().skip(1) {
@@ -489,35 +489,126 @@ where
     /// Group benchmark measurements.
     ///
     /// Each label is a group.
-    pub fn grp(&self, lbls: &Lbls<L>) -> Result<Grps<L>>
+    pub fn grp(&self, grp_lblss: &Vec<Lbls<L>>, srt: &Option<String>) -> Result<Grps<L>>
     where
         L: Label,
         String: From<<L as FromStr>::Err>,
     {
-        let mut ret = Vec::with_capacity(lbls.0.len());
-        for grp_lbl in lbls.0.iter() {
-            // Group data by label.
-            let mut grp_dats = Vec::new();
-            for dat in self.res.iter() {
-                for dat_lbl in dat.lbls.0.iter() {
-                    if *grp_lbl == *dat_lbl {
-                        grp_dats.push(dat.clone());
-                        break;
-                    }
+        let mut ret = Vec::with_capacity(grp_lblss.len());
+
+        // Create a hashmap of the run results.
+        // Use the dat index as the id.
+        let mut dats: HashMap<u16, Dat<L>> = HashMap::new();
+
+        // Create a map of label to ids.
+        let mut ids: HashMap<L, HashSet<u16>> = HashMap::new();
+
+        // Populate hashmaps for later searching.
+        for (n, dat) in self.res.iter().enumerate() {
+            let id = n as u16;
+
+            // Insert the id to dat.
+            // Clone dat to ensure each group has access to the dat.
+            // Possible that each group contains same dat.
+            dats.insert(id, dat.clone());
+
+            // Insert the dat id for each label.
+            for lbl in dat.lbls.0.iter() {
+                let lbl_ids = ids.entry(*lbl).or_insert(HashSet::new());
+                lbl_ids.insert(id);
+            }
+        }
+
+        // Create groups.
+        for grp_lbls in grp_lblss.iter() {
+            // Gather ids for group labels.
+            // Each label has a list of benchmark ids.
+            // Ensure each id is present in each label list.
+            let mut qry_lbl_ids: Vec<&HashSet<u16>> = Vec::new();
+            for lbl in grp_lbls.0.iter() {
+                if let Some(lbl_ids) = ids.get(lbl) {
+                    qry_lbl_ids.push(lbl_ids);
                 }
             }
 
-            // Notify of an empty group.
-            if grp_dats.is_empty() {
+            // Notify queried label doesn't exist in Frm query.
+            if qry_lbl_ids.is_empty() {
                 return Err(format!(
                     "empty group: label '{}' didn't produce a group",
-                    grp_lbl
+                    grp_lbls.join(Some('-'))
                 ));
             }
 
+            // Gather matched benchmark ids.
+            // Intersect the id across each list for a match.
+            // Find which benchmark ids are within each label list.
+            let mut matched_ids: Vec<u16> = Vec::new();
+            let mut matching_lbl_set = qry_lbl_ids[0].clone();
+            for qry_lbl_set in qry_lbl_ids.into_iter().skip(1) {
+                matching_lbl_set = &matching_lbl_set & qry_lbl_set;
+            }
+            matched_ids.extend(matching_lbl_set);
+
+            // Check whether there are any matching ids.
+            if matched_ids.is_empty() {
+                return Err(format!(
+                    "empty group: label '{}' didn't produce a group",
+                    grp_lbls.join(Some('-'))
+                ));
+            }
+
+            // Gather group of dats from the matched ids.
+            let mut grp_dats: Vec<Dat<L>> = Vec::new();
+            for matched_id in matched_ids {
+                if let Some(matched_dat) = dats.remove(&matched_id) {
+                    grp_dats.push(matched_dat);
+                }
+            }
+
+            // Sort group.
+            if let Some(srt) = srt {
+                let srt_lbl = L::from_str(srt)?;
+                grp_dats.sort_unstable_by_key(|dat| {
+                    let o_lbl = dat
+                        .lbls
+                        .0
+                        .iter()
+                        .find(|x| mem::discriminant(*x) == mem::discriminant(&srt_lbl));
+                    if let Some(lbl) = o_lbl {
+                        *lbl
+                    } else {
+                        L::default()
+                    }
+                });
+            }
+
             // Add a group.
-            ret.push(Grp::new(&[*grp_lbl], grp_dats));
+            ret.push(Grp::new(&grp_lbls.0, grp_dats));
         }
+
+        // for grp_lbl in grp_lbls.iter() {
+        //     // Group data by label.
+        //     let mut grp_dats = Vec::new();
+        //     for dat in self.res.iter() {
+        //         for dat_lbl in dat.lbls.0.iter() {
+        //             if *grp_lbl == *dat_lbl {
+        //                 grp_dats.push(dat.clone());
+        //                 break;
+        //             }
+        //         }
+        //     }
+
+        //     // Notify of an empty group.
+        //     if grp_dats.is_empty() {
+        //         return Err(format!(
+        //             "empty group: label '{}' didn't produce a group",
+        //             grp_lbl
+        //         ));
+        //     }
+
+        //     // Add a group.
+        //     ret.push(Grp::new(&[*grp_lbl], grp_dats));
+        // }
         Ok(Grps(ret))
     }
 }
@@ -846,7 +937,7 @@ impl fmt::Display for Cmps {
 }
 
 /// Results of a benchmark function run.
-#[derive(Debug, Clone)] //, Eq, PartialEq)]
+#[derive(Debug, Clone)]
 pub struct Dat<L>
 where
     L: Label,
@@ -1192,6 +1283,29 @@ pub fn fmt_f32(v: f32) -> String {
         s.drain(s.len() - 2..);
     }
     fmt_num(s)
+}
+
+/// Returns a parsed labels supporting `lbl` and `lbl-lbl`.
+pub fn lbls_try_from<L>(v: &Vec<String>) -> Result<Vec<Lbls<L>>>
+where
+    L: Label,
+    String: From<<L as FromStr>::Err>,
+{
+    let mut ret: Vec<Lbls<L>> = Vec::with_capacity(v.len());
+    for s in v {
+        if s.contains('-') {
+            // Parse lbl-lbl.
+            let mut inr: Vec<L> = Vec::new();
+            for str in s.split('-') {
+                inr.push(L::from_str(str)?);
+            }
+            ret.push(Lbls::new(&inr));
+        } else {
+            // Parse single lbl.
+            ret.push(Lbls::new(&[L::from_str(s)?]));
+        }
+    }
+    Ok(ret)
 }
 
 /// A Result with a String error.
