@@ -630,7 +630,7 @@ where
                             ));
                         }
                         Some(lbl) => {
-                            trn_vals.push(lbl.val()?);
+                            trn_vals.push(lbl.val()? as u64);
                         }
                     }
                 }
@@ -1068,7 +1068,7 @@ where
 /// For example, enum `Len(3)` returns `3`.
 pub trait EnumStructVal {
     /// `val` returns an inner struct value from an enum.
-    fn val(&self) -> Result<u64>;
+    fn val(&self) -> Result<u32>;
 }
 
 /// Measures the ellapsed time of processor instructions.
