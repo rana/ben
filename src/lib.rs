@@ -1,4 +1,4 @@
-//! Benchmarking for functions.
+//! Benchmarking for Rust functions.
 //!
 //! * Measure function performance in CPU cycles.
 //! * Query benchmarks with user-defined labels.
