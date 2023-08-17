@@ -1,10 +1,4 @@
-//! Benchmarking for Rust functions.
-//!
-//! * Measure function performance in CPU cycles.
-//! * Query benchmarks with user-defined labels.
-//! * Aggregate and compare function statistics.
-//! * Display data in command-line tables.
-//! * Query benchmarks from the command-line.
+//! Benchmark, query, and compare Rust performance.
 
 #![allow(dead_code)]
 
