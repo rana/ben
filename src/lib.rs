@@ -16,6 +16,7 @@ use std::{
     ops::Div,
     rc::Rc,
 };
+use Stat::*;
 
 #[derive(Debug, Clone)]
 pub struct Qry<L>
@@ -29,7 +30,7 @@ where
     /// Sort benchmarks by a struct label.
     pub srt: Option<L>,
     /// Apply a statisitcal function to benchmark results.
-    pub sta: Option<Sta>,
+    pub sta: Option<Stat>,
     /// Transpose groups to series with the specified struct label.
     pub trn: Option<L>,
     /// Compare pairs of benchmarks as a ratio of max/min.
@@ -323,7 +324,7 @@ where
     }
 
     /// Run benchmark functions.
-    pub fn run(&self, itr: u32, srt: &Option<L>, sel: &Option<Sta>) -> Result<Run<L>> {
+    pub fn run(&self, itr: u32, srt: &Option<L>, sel: &Option<Stat>) -> Result<Run<L>> {
         let mut res: Vec<Dat<L>> = Vec::with_capacity(self.ops.len());
 
         // Calculate the overhead of running the CPU timestamp instructions.
@@ -349,25 +350,26 @@ where
 
             // Apply a statistical function to the benchmark results.
             // Overwrite benchmark results with the output of the statistical function.
-            if let Some(stat) = sel {
+            if let Some(stat) = *sel {
                 match stat {
-                    Sta::Mdn => {
+                    Mdn => {
                         let mdl = vals.len() / 2;
                         let mdn = vals.select_nth_unstable(mdl).1;
                         vals = vec![*mdn];
                     }
-                    Sta::Avg => {
+                    Avg => {
                         let avg = vals.iter().sum::<u64>().saturating_div(vals.len() as u64);
                         vals = vec![avg];
                     }
-                    Sta::Min => {
+                    Min => {
                         let min = vals.iter().min().unwrap();
                         vals = vec![*min];
                     }
-                    Sta::Max => {
+                    Max => {
                         let max = vals.iter().max().unwrap();
                         vals = vec![*max];
                     }
+                    Raw => {}
                 }
             }
             res.push(Dat::new(&op.lbls, vals))
@@ -570,7 +572,7 @@ where
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
 
 /// Statisitcal functions for benchmark results.
-pub enum Sta {
+pub enum Stat {
     /// Median of the benchmark results.
     #[default]
     Mdn,
@@ -580,6 +582,8 @@ pub enum Sta {
     Max,
     /// Average of the benchmark results.
     Avg,
+    /// Raw benchmarks with no statisitcal functions applied.
+    Raw,
 }
 
 // A group of benchmark results.
