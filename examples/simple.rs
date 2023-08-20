@@ -82,8 +82,8 @@ impl EnumStructVal for Lbl {
 impl Label for Lbl {}
 
 /// Returns a set of benchmark functions ready to be run.
-pub fn new_set() -> Result<Set<Lbl>> {
-    let ret = Set::new();
+pub fn new_set() -> Result<Stdy<Lbl>> {
+    let ret = Stdy::new();
     {
         let sec = ret.sec(&[Alc, Arr]);
         sec.ins(&[Len(16)], || [0u32; 16])?;

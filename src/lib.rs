@@ -39,8 +39,8 @@ where
     pub itr: u32,
 }
 
-// A set of benchmark functions.
-pub struct Set<L>
+// A benchmark function study.
+pub struct Stdy<L>
 where
     L: Label,
 {
@@ -54,14 +54,14 @@ where
     #[allow(clippy::type_complexity)]
     pub ops: RefCell<HashMap<u16, Op<L>>>,
 }
-impl<L> Set<L>
+impl<L> Stdy<L>
 where
     L: Label,
 {
     // Returns a new set of benchmark functions.
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Set {
+        Stdy {
             id: RefCell::new(0),
             ids: RefCell::new(HashMap::new()),
             ops: RefCell::new(HashMap::new()),
@@ -287,7 +287,7 @@ where
         Some(ret)
     }
 }
-impl<L> fmt::Debug for Set<L>
+impl<L> fmt::Debug for Stdy<L>
 where
     L: Label,
 {
@@ -947,28 +947,28 @@ where
     }
 }
 
-/// A section of a set.
+/// A section of a study.
 ///
 /// Convenient for appending redundant labels.
 #[derive(Debug)]
-pub struct Sec<'set, L>
+pub struct Sec<'stdy, L>
 where
     L: Label,
 {
     /// Labels for the section.
     pub lbls: Vec<L>,
-    /// The parent set.
-    pub set: Rc<RefCell<&'set Set<L>>>,
+    /// The parent stdy.
+    pub stdy: Rc<RefCell<&'stdy Stdy<L>>>,
 }
-impl<'set, L> Sec<'set, L>
+impl<'stdy, L> Sec<'stdy, L>
 where
     L: Label,
 {
     /// Returns a new section.
-    pub fn new(lbls: &[L], set: Rc<RefCell<&'set Set<L>>>) -> Self {
+    pub fn new(lbls: &[L], stdy: Rc<RefCell<&'stdy Stdy<L>>>) -> Self {
         Sec {
             lbls: unq_srt(lbls),
-            set,
+            stdy,
         }
     }
 
@@ -982,7 +982,7 @@ where
         let all_lbls = mrg_unq_srt(&self.lbls, lbls);
 
         // Insert a benchmark function.
-        self.set.borrow().ins(&all_lbls, f)
+        self.stdy.borrow().ins(&all_lbls, f)
     }
 
     /// Insert a benchmark function, which is manually timed,
@@ -996,7 +996,7 @@ where
         let all_lbls = mrg_unq_srt(&self.lbls, lbls);
 
         // Insert a benchmark function.
-        self.set.borrow().ins_prm(&all_lbls, f)
+        self.stdy.borrow().ins_prm(&all_lbls, f)
     }
 }
 
