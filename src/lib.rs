@@ -4,7 +4,9 @@
 use anyhow::{bail, Ok, Result};
 use itr::rngs;
 use sptr::OpaqueFnPtr;
+use std::cell::RefCell;
 use std::marker::PhantomData;
+use std::rc::Rc;
 use std::sync::mpsc::channel;
 use std::{
     arch::x86_64,
@@ -277,6 +279,7 @@ where
     pub fn ins_ben_blds(&mut self) {
         (self.f)(self);
     }
+    /// Insert a benchmark function.
     pub fn ins<O>(&mut self, lbl: L, f: fn() -> O) -> &mut Self {
         // Capture a function pointer to the benchmark function.
         // Enables the benchmark function to return a genericaly typed value
@@ -299,6 +302,26 @@ where
             let fst = fst_cpu_cyc();
             black_box(ben());
             lst_cpu_cyc() - fst
+        }
+
+        self.ben_blds
+            .push(BenBld::new(self.id, lbl, fn_ptr, ben::<O>));
+        self
+    }
+    /// Insert a benchmark function which is manually timed.
+    ///
+    /// The caller is expected to call `start()` and `stop()` functions
+    /// on the specified `Tme` parameter.
+    pub fn ins_prm<O>(&mut self, lbl: L, f: fn(Rc<RefCell<Tme>>) -> O) -> &mut Self {
+        let fn_ptr = unsafe { OpaqueFnPtr::from_fn(f) };
+
+        #[inline]
+        fn ben<O>(fn_ptr: OpaqueFnPtr) -> u64 {
+            let ben: fn(Rc<RefCell<Tme>>) -> O = unsafe { fn_ptr.to_fn() };
+            let tme = Rc::new(RefCell::new(Tme(0)));
+            black_box(ben(tme.clone()));
+            let x = tme.borrow();
+            x.0
         }
 
         self.ben_blds
