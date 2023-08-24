@@ -1,1008 +1,596 @@
-//! Benchmark, query, and compare Rust performance.
+#![allow(clippy::new_without_default)]
+#![feature(fn_ptr_trait)]
 
-#![allow(dead_code)]
-
-use anyhow::{bail, Result};
-use comfy_table::{presets::UTF8_FULL, Cell, Color, Row, Table};
-use itertools::Itertools;
+use anyhow::{bail, Ok, Result};
+use itr::rngs;
+use sptr::OpaqueFnPtr;
+use std::marker::PhantomData;
+use std::sync::mpsc::channel;
 use std::{
     arch::x86_64,
-    cell::RefCell,
-    collections::{HashMap, HashSet},
-    fmt::{self, Debug, Display},
-    hash::Hash,
+    collections::{hash_map::DefaultHasher, HashMap},
+    fmt::{Debug, Display},
+    hash::{Hash, Hasher},
     hint::black_box,
     mem,
-    ops::Div,
-    rc::Rc,
 };
-use Stat::*;
+use std::{fmt, thread};
+use threadpool::ThreadPool;
+use Sta::*;
+mod tbl;
 
-#[derive(Debug, Clone)]
-pub struct Qry<L>
-where
-    L: Label,
-{
-    /// Run benchmarks from one or more labels.
-    pub frm: Vec<Vec<L>>,
-    /// Group benchmarks into one or more labels. Each label is a group.
-    pub grp: Option<Vec<Vec<L>>>,
-    /// Sort benchmarks by a struct label.
-    pub srt: Option<L>,
-    /// Apply a statisitcal function to benchmark results.
-    pub sta: Option<Stat>,
-    /// Transpose groups to series with the specified struct label.
-    pub trn: Option<L>,
-    /// Compare pairs of benchmarks as a ratio of max/min.
-    pub cmp: bool,
-    /// Set the number of iterations for each benchmark function.
-    pub itr: u32,
-}
-
-// A benchmark function study.
+/// A benchmark study.
+#[derive(Debug)]
 pub struct Stdy<L>
 where
     L: Label,
 {
-    /// A seed id given to inserted benchmark functions.
-    pub id: RefCell<u16>,
-    /// Labels mapped to benchmark ids.
-    ///
-    /// HashSets are used to perform search intersections.
-    pub ids: RefCell<HashMap<L, HashSet<u16>>>,
-    /// Benchmark ids mapped to benchmark functions.
-    #[allow(clippy::type_complexity)]
-    pub ops: RefCell<HashMap<u16, Op<L>>>,
+    pub reg_blds: HashMap<u64, RegBld<L>>,
 }
 impl<L> Stdy<L>
 where
     L: Label,
 {
-    // Returns a new set of benchmark functions.
-    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Stdy {
-            id: RefCell::new(0),
-            ids: RefCell::new(HashMap::new()),
-            ops: RefCell::new(HashMap::new()),
+            reg_blds: HashMap::new(),
         }
     }
-
-    /// Returns a section.
-    ///
-    /// Useful for appending redundant labels.
-    pub fn sec(&self, lbls: &[L]) -> Sec<L> {
-        Sec::new(lbls, Rc::new(RefCell::new(self)))
+    pub fn reg_bld(&mut self, lbls: &[L], f: fn(&mut RegBld<L>)) -> &mut Self {
+        if !lbls.is_empty() {
+            let reg_bld = RegBld::new(lbls, f);
+            self.reg_blds.entry(reg_bld.id).or_insert(reg_bld);
+        }
+        self
     }
+    pub fn run(&mut self, qry_bld: QryBld<L>, itr: u16) -> Result<Qry<L>> {
+        // println!("--- stdy.run: itr:{}, {:?}", itr, qry_bld);
+        // println!("        reg_blds:{}", self.reg_blds.len());
+        // println!("qry_bld.sel_blds:{}", qry_bld.sel_blds.len());
+        // println!("qry_bld.cmp_blds:{}", qry_bld.cmp_blds.len());
 
-    /// Queries the set.
-    ///
-    /// Results are printed to the console.
-    pub fn qry(&self, qry: Qry<L>) -> Result<()> {
-        // dbg.then(|| println!("{:?}", qry));
+        // Create a runtime query from the build query.
+        let qry = Qry::new();
 
-        // Query benchmark functions.
-        match self.frm(&qry.frm) {
-            None => {
-                println!("No matches")
-            }
-            Some(frm) => {
-                // dbg.then(|| println!("{:?}", frm));
+        // Create benchmark functions from the build registry.
+        let mut ben_blds: Vec<BenBld<L>> = Vec::with_capacity(qry_bld.sel_blds.len() * 16);
+        for (_, sel_bld) in qry_bld.sel_blds.iter() {
+            match self.reg_blds.get_mut(&sel_bld.reg_id()) {
+                None => bail!(
+                    "build registry: missing selection '{}'",
+                    join(&sel_bld.lbls, ',')
+                ),
+                Some(reg_bld) => {
+                    // Insert benchmark functions.
+                    reg_bld.ins_ben_blds();
+                    // println!("    reg_bld.ben_blds:{:?}", reg_bld.ben_blds.len());
 
-                // Run benchmark functions.
-                let mut run = frm.run(qry.itr, &qry.srt, &qry.sta)?;
-                // dbg.then(|| println!("{:?}", run));
-                match &qry.grp {
-                    None => {
-                        println!("{}", run);
+                    // Validate BenBld exist.
+                    if reg_bld.ben_blds.is_empty() {
+                        bail!(
+                            "empty benchmarks: no benchmarks inserted for registry build '{}'",
+                            join(&sel_bld.lbls, ',')
+                        );
                     }
-                    Some(qry_grp) => {
-                        // Group benchmark results.
-                        let grps = run.grp(qry_grp, &qry.srt)?;
-                        // dbg.then(|| println!("{:?}", grps));
 
-                        match &qry.trn {
-                            None => {
-                                println!("{}", grps);
-                            }
-                            Some(trn_lbl) => {
-                                // Transpose groups to series.
-                                let sers = grps.ser(*trn_lbl)?;
-                                // dbg.then(|| println!("{:?}", sers));
-                                if !qry.cmp {
-                                    println!("{}", sers);
-                                } else {
-                                    let cmps = sers.cmp()?;
-                                    // dbg.then(|| println!("{:?}", cmps));
-                                    println!("{}", cmps);
-                                }
-                            }
+                    // Validate identical BenBld.Lbl discriminants.
+                    if reg_bld.ben_blds.len() >= 2 {
+                        let fst_dis = mem::discriminant(&reg_bld.ben_blds[0].lbl);
+                        if !reg_bld
+                            .ben_blds
+                            .iter()
+                            .all(|x| mem::discriminant(&x.lbl) == fst_dis)
+                        {
+                            bail!(
+                            "different benchmark labels: expected identical label discriminants for registry build '{}'",
+                            join(&sel_bld.lbls, ',')
+                        );
                         }
                     }
+
+                    // Store benchmark functions.
+                    ben_blds.extend(reg_bld.ben_blds.drain(0..));
                 }
             }
         }
-        Ok(())
-    }
+        // println!("    ben_blds:{:?}", ben_blds);
 
-    /// Insert a benchmark function to the set.
-    pub fn ins<F, O>(&self, lbls: &[L], mut f: F) -> Result<()>
-    where
-        F: FnMut() -> O,
-        F: 'static,
-    {
-        if lbls.is_empty() {
-            bail!("missing label: parameter 'lbls' is empty");
-        }
+        // Run benchmark functions in parallel.
+        let ben_cnt = ben_blds.len();
+        let thd_cnt = thread::available_parallelism().unwrap().into();
+        let pool = ThreadPool::new(thd_cnt);
+        let (tx, rx) = channel();
+        // println!("thd_cnt:{}, ben_cnt:{}", thd_cnt, ben_cnt);
+        for rng in rngs(thd_cnt, ben_cnt) {
+            let rng_ben_blds: Vec<BenBld<L>> = ben_blds.drain(0..rng.len()).collect();
+            // println!("rng_ben_blds:{}", rng_ben_blds.len());
+            let tx = tx.clone();
+            pool.execute(move || {
+                // Calculate the overhead of running the CPU timestamp instructions.
+                // Subtracting the overhead produces a more accurate measurement.
+                let overhead = overhead_cpu_cyc();
 
-        // Capture the benchmark function in a closure.
-        // Enables the benchmark function to return a genericaly typed value
-        // while benchmark returns a single timestamp value.
-        // Returning a value from the benchmark function, in coordination with `black_box()`,
-        // disallows the compiler from optimizing away inner logic.
-        // Returns `FnMut() -> u64` to enable selecting and running benchmark functions.
-        let fnc = Rc::new(RefCell::new(move || {
-            // Avoid compiler over-optimization of benchmark functions by using `black_box(f())`.
-            //  Explanation of how black_box works with LLVM ASM and memory.
-            //      https://github.com/rust-lang/rust/blob/6a944187fb917393c9c6c39825dec3c1de29787c/compiler/rustc_codegen_llvm/src/intrinsic.rs#L339
-            // `black_box` call from rust benchmark.
-            //      https://github.com/rust-lang/rust/blob/cb6ab9516bbbd3859b56dd23e32fe41600e0ae02/library/test/src/lib.rs#L628
-            // Record cpu cycles with assembly instructions.
-            let fst = fst_cpu_cyc();
-            black_box(f());
-            lst_cpu_cyc() - fst
-        }));
+                for ben_bld in rng_ben_blds {
+                    let mut vals: Vec<u64> = Vec::with_capacity(itr as usize);
 
-        let id = *self.id.borrow();
-
-        // Insert a benchmark function id for each label.
-        let mut ids = self.ids.borrow_mut();
-        for lbl in lbls.clone() {
-            let lbl_ids = ids.entry(*lbl).or_insert(HashSet::new());
-            lbl_ids.insert(id);
-        }
-
-        // Insert the benchmark function.
-        self.ops.borrow_mut().insert(id, Op::new(lbls, fnc));
-
-        // Increment the id for the next insert call.
-        *self.id.borrow_mut() += 1;
-
-        Ok(())
-    }
-
-    /// Insert a benchmark function which is manually timed.
-    ///
-    /// The caller is expected to call `start()` and `stop()` functions
-    /// on the specified `Tme` parameter.
-    pub fn ins_prm<F, O>(&self, lbls: &[L], mut f: F) -> Result<()>
-    where
-        F: FnMut(Rc<RefCell<Tme>>) -> O,
-        F: 'static,
-    {
-        if lbls.is_empty() {
-            bail!("missing label: parameter 'lbls' is empty");
-        }
-
-        // Capture the benchmark function in a closure.
-        // Enables the benchmark function to return a genericaly typed value
-        // while benchmark returns a single timestamp value.
-        // Returning a value from the benchmark function, in coordination with `black_box()`,
-        // disallows the compiler from optimizing away inner logic.
-        // Returns `FnMut() -> u64` to enable selecting and running benchmark functions.
-        let fnc = Rc::new(RefCell::new(move || {
-            // Avoid compiler over-optimization of benchmark functions by using `black_box(f())`.
-            //  Explanation of how black_box works with LLVM ASM and memory.
-            //      https://github.com/rust-lang/rust/blob/6a944187fb917393c9c6c39825dec3c1de29787c/compiler/rustc_codegen_llvm/src/intrinsic.rs#L339
-            // `black_box` call from rust benchmark.
-            //      https://github.com/rust-lang/rust/blob/cb6ab9516bbbd3859b56dd23e32fe41600e0ae02/library/test/src/lib.rs#L628
-            // Record cpu cycles with assembly instructions.
-            let tme = Rc::new(RefCell::new(Tme(0)));
-            black_box(f(tme.clone()));
-            let x = tme.borrow();
-            x.0
-        }));
-
-        let id = *self.id.borrow();
-
-        // Insert a benchmark function id for each label.
-        let mut ids = self.ids.borrow_mut();
-        for lbl in lbls.clone() {
-            let lbl_ids = ids.entry(*lbl).or_insert(HashSet::new());
-            lbl_ids.insert(id);
-        }
-
-        // Insert the benchmark function.
-        self.ops.borrow_mut().insert(id, Op::new(lbls, fnc));
-
-        // Increment the id for the next insert call.
-        *self.id.borrow_mut() += 1;
-
-        Ok(())
-    }
-
-    // Returns benchmark functions matching the specified labels.
-    pub fn frm(&self, lblss: &Vec<Vec<L>>) -> Option<Frm<L>> {
-        // Check for case where labels are empty.
-        if lblss.is_empty() || lblss.iter().all(|x| x.is_empty()) {
-            return None;
-        }
-
-        // Create return object.
-        let mut ret = Frm::new(lblss);
-
-        for lbls in lblss {
-            // Gather benchmark ids by queried label.
-            // Each label has a list of benchmark ids.
-            // Ensure each id is present in each label list.
-            let mut qry_lbl_ids: Vec<&HashSet<u16>> = Vec::new();
-            let ids = self.ids.borrow();
-            for lbl in lbls.iter() {
-                if let Some(lbl_ids) = ids.get(lbl) {
-                    qry_lbl_ids.push(lbl_ids);
-                }
-            }
-
-            // Check for case where queried label
-            // doesn't exist in root benchmark set.
-            if qry_lbl_ids.len() != lbls.len() || qry_lbl_ids.is_empty() {
-                // println!(
-                //     "set.frm: qry_lbl_ids.len:{} != lbls.len:{}",
-                //     qry_lbl_ids.len(),
-                //     lbls.len()
-                // );
-                continue;
-            }
-
-            // Gather matched benchmark ids.
-            // Intersect the id across each list for a match.
-            // Find which benchmark ids are within each label list.
-            let mut matched_ids: Vec<u16> = Vec::new();
-            let mut matching_lbl_set = qry_lbl_ids[0].clone();
-            for qry_lbl_set in qry_lbl_ids.into_iter().skip(1) {
-                matching_lbl_set = &matching_lbl_set & qry_lbl_set;
-            }
-            matched_ids.extend(matching_lbl_set);
-
-            // Check whether there are any matching ids.
-            if matched_ids.is_empty() {
-                // println!("set.frm: matched_ids.is_empty");
-                continue;
-            }
-
-            // Gather benchmark functions from the matched ids.
-            let all_ops = self.ops.borrow();
-            for matched_id in matched_ids {
-                if let Some(matched_fn) = all_ops.get(&matched_id) {
-                    ret.ops.push(matched_fn.clone());
-                }
-            }
-        }
-
-        // Check for case where there aren't any match benchmark functions.
-        if ret.ops.is_empty() {
-            return None;
-        }
-
-        Some(ret)
-    }
-}
-impl<L> fmt::Debug for Stdy<L>
-where
-    L: Label,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Set")
-            .field("id", &self.id)
-            .field("ids", &self.ids.borrow())
-            .field("ops.keys", &self.ops.borrow().keys())
-            .finish()
-    }
-}
-
-// Benchmark functions matching labels.
-pub struct Frm<L>
-where
-    L: Label,
-{
-    /// Query labels.
-    pub lbls: Vec<Vec<L>>,
-    /// Benchmark functions matching labels.
-    pub ops: Vec<Op<L>>,
-}
-impl<L> Frm<L>
-where
-    L: Label,
-{
-    // Returns a new `Frm` query.
-    #[allow(clippy::ptr_arg)]
-    pub fn new(lbls: &Vec<Vec<L>>) -> Self {
-        Frm {
-            lbls: lbls.clone(),
-            ops: Vec::new(),
-        }
-    }
-
-    /// Run benchmark functions.
-    pub fn run(&self, itr: u32, srt: &Option<L>, sel: &Option<Stat>) -> Result<Run<L>> {
-        let mut res: Vec<Dat<L>> = Vec::with_capacity(self.ops.len());
-
-        // Calculate the overhead of running the CPU timestamp instructions.
-        // Subtracting the overhead produces a more accurate measurement.
-        let overhead = overhead_cpu_cyc();
-
-        // Run each benchmark function.
-        for op in self.ops.iter() {
-            // Avoid compiler over-optimization of benchmark functions by using `black_box(f())`.
-            //  Explanation of how black_box works with LLVM ASM and memory.
-            //      https://github.com/rust-lang/rust/blob/6a944187fb917393c9c6c39825dec3c1de29787c/compiler/rustc_codegen_llvm/src/intrinsic.rs#L339
-            // `black_box` call from rust benchmark.
-            //      https://github.com/rust-lang/rust/blob/cb6ab9516bbbd3859b56dd23e32fe41600e0ae02/library/test/src/lib.rs#L628
-            let mut benchmark = op.fnc.as_ref().borrow_mut();
-            let mut vals: Vec<u64> = Vec::with_capacity(itr as usize);
-
-            // Record benchmark function multiple times.
-            // Micro-benchmarks can vary on each iteration.
-            for _ in 0..itr {
-                let ellapsed = benchmark();
-                vals.push(ellapsed - overhead);
-            }
-
-            // Apply a statistical function to the benchmark results.
-            // Overwrite benchmark results with the output of the statistical function.
-            if let Some(stat) = *sel {
-                match stat {
-                    Mdn => {
-                        let mdl = vals.len() / 2;
-                        let mdn = vals.select_nth_unstable(mdl).1;
-                        vals = vec![*mdn];
+                    // Record benchmark function multiple times.
+                    // Benchmark times vary at each iteration.
+                    for _ in 0..itr {
+                        let ellapsed = ben_bld.run();
+                        vals.push(ellapsed - overhead);
                     }
-                    Avg => {
-                        let avg = vals.iter().sum::<u64>().saturating_div(vals.len() as u64);
-                        vals = vec![avg];
-                    }
-                    Min => {
-                        let min = vals.iter().min().unwrap();
-                        vals = vec![*min];
-                    }
-                    Max => {
-                        let max = vals.iter().max().unwrap();
-                        vals = vec![*max];
-                    }
-                    Raw => {}
-                }
-            }
-            res.push(Dat::new(&op.lbls, vals))
-        }
 
-        // Sort benchmark results.
-        if let Some(srt_lbl) = srt {
-            res.sort_unstable_by_key(|dat| {
-                let o_lbl = dat
-                    .lbls
-                    .iter()
-                    .find(|x| mem::discriminant(*x) == mem::discriminant(srt_lbl));
-                if let Some(lbl) = o_lbl {
-                    *lbl
-                } else {
-                    L::default()
+                    // Send the benchmark results back to the main thread.
+                    let ben = Ben::new(ben_bld.lbl, vals);
+                    if let Err(e) = tx.send((ben_bld.reg_id, ben)) {
+                        println!("send ben error: {:?}", e);
+                    }
                 }
             });
         }
 
-        Ok(Run::new(res))
+        // Create registrations with benchmark results.
+        // Registrations may be shared by multipe selections.
+        let mut regs: HashMap<u64, Reg<L>> = HashMap::with_capacity(qry_bld.sel_blds.len());
+        for (reg_id, ben) in rx.iter().take(ben_cnt) {
+            let reg = regs.entry(reg_id).or_insert_with(|| {
+                let reg_bld = self.reg_blds.get(&reg_id).unwrap();
+                Reg::new(&reg_bld.lbls)
+            });
+            reg.bens.push(ben);
+        }
+        // println!("    regs:{:?}", regs);
+
+        // Create selections from benchmark results.
+        let mut sels = HashMap::with_capacity(qry_bld.sel_blds.len());
+        for sel_bld in qry_bld.sel_blds.values() {
+            // Get matching registration and raw benchmark results.
+            let reg = regs.get(&sel_bld.reg_id()).unwrap();
+
+            // Apply a statistical function to each benchmark result.
+            let mut sta_vals = Vec::with_capacity(reg.bens.len());
+            for ben in reg.bens.iter() {
+                // Clone benchmark values when necessary.
+                // Multiple selections may rely on the same benchmark values.
+                let val = match sel_bld.sta {
+                    Mdn => {
+                        let mdl = ben.vals.len() / 2;
+                        *ben.vals.clone().select_nth_unstable(mdl).1
+                    }
+                    Avg => {
+                        let len = ben.vals.len() as u64;
+                        ben.vals.iter().sum::<u64>().saturating_div(len)
+                    }
+                    Min => *ben.vals.iter().min().unwrap(),
+                    Max => *ben.vals.iter().max().unwrap(),
+                };
+                sta_vals.push(StaVal::new(ben.lbl, val));
+            }
+
+            // Sort vals based on lbl.
+            sta_vals.sort_unstable_by_key(|x| x.lbl);
+
+            // Store selection.
+            let sel = Sel::new(&sel_bld.lbls, sel_bld.sta, sta_vals);
+            sels.entry(sel_bld.id()).or_insert(sel);
+        }
+        // println!("    sels:{:?}", sels);
+
+        // Create comparisons.
+        let mut cmps = Vec::with_capacity(qry_bld.cmp_blds.len());
+        for cmp_bld in qry_bld.cmp_blds.iter() {
+            let a_sel = match sels.get(&cmp_bld.a_sel_id) {
+                None => bail!("missing sel: a_sel_id {}", cmp_bld.a_sel_id),
+                Some(x) => x,
+            };
+            let b_sel = match sels.get(&cmp_bld.b_sel_id) {
+                None => bail!("missing sel: b_sel_id {}", cmp_bld.b_sel_id),
+                Some(x) => x,
+            };
+
+            // Validate that labels have equal lengths.
+            if a_sel.vals.len() != b_sel.vals.len() {
+                bail!(
+                    "uneven selection lengths: (a len:{}, b len:{})",
+                    a_sel.vals.len(),
+                    b_sel.vals.len()
+                )
+            }
+            // Validate each label by index.
+            // Values were previously sorted by label.
+            for (idx, (a, b)) in a_sel.vals.iter().zip(b_sel.vals.iter()).enumerate() {
+                if a.lbl != b.lbl {
+                    bail!("unequal labels: idx:{} (a:{}, b:{})", idx, a.lbl, b.lbl)
+                }
+            }
+
+            // Create comparison data.
+            let hdr_lbls: Vec<L> = a_sel.vals.iter().map(|x| x.lbl).collect();
+            let a_lbls: Vec<L> = a_sel.lbls.clone();
+            let b_lbls: Vec<L> = b_sel.lbls.clone();
+            let a_vals: Vec<u64> = a_sel.vals.iter().map(|x| x.val).collect();
+            let b_vals: Vec<u64> = b_sel.vals.iter().map(|x| x.val).collect();
+
+            // Calculate the ratio of values at each index.
+            let mut ratios: Vec<f32> = Vec::with_capacity(a_vals.len());
+            for (a, b) in a_vals.iter().zip(b_vals.iter()) {
+                let a = *a as f32;
+                let b = *b as f32;
+                let (mut min, max) = if a < b { (a, b) } else { (b, a) };
+                min = min.max(1.0);
+                let ratio = f32_pnt_one(max / min);
+                ratios.push(ratio);
+            }
+
+            // Store the comparison.
+            let cmp = Cmp::new(hdr_lbls, a_lbls, b_lbls, a_vals, b_vals, ratios);
+            cmps.push(cmp);
+        }
+        // println!("    cmps:{:?}", cmps);
+
+        // Print comparisons.
+        for cmp in cmps {
+            println!("{}", cmp);
+        }
+
+        // for ben in sel.bens.iter() {
+        //     // Merge labels.
+        //     // &[Alc, Arr] + &[Len(16)]
+        //     let mrg_lbls = mrg_unq_srt(&reg_bld.lbls, &ben.lbls);
+        //     println!("    mrg_lbls:{:?}", mrg_lbls);
+        //     let ellapsed = ben.run();
+        //     println!("    ellapsed:{:?}", ellapsed);
+        // }
+
+        Ok(qry)
     }
 }
-impl<L> fmt::Debug for Frm<L>
+pub struct RegBld<L>
+where
+    L: Label,
+{
+    pub id: u64,
+    pub lbls: Vec<L>,
+    pub f: fn(&mut RegBld<L>),
+    pub ben_blds: Vec<BenBld<L>>,
+}
+impl<L> RegBld<L>
+where
+    L: Label,
+{
+    pub fn new(lbls: &[L], f: fn(&mut RegBld<L>)) -> Self {
+        // Unique and sort the labels for consistent hash id.
+        let unq_srt_lbls = unq_srt(lbls);
+        // Create a hash id from the labels.
+        let mut h = DefaultHasher::new();
+        for lbl in unq_srt_lbls.iter() {
+            lbl.hash(&mut h);
+        }
+        RegBld {
+            id: h.finish(),
+            lbls: unq_srt_lbls,
+            f,
+            ben_blds: Vec::new(),
+        }
+    }
+    #[inline]
+    pub fn ins_ben_blds(&mut self) {
+        (self.f)(self);
+    }
+    pub fn ins<O>(&mut self, lbl: L, f: fn() -> O) -> &mut Self {
+        // Capture a function pointer to the benchmark function.
+        // Enables the benchmark function to return a genericaly typed value
+        // while the benchmark returns a u64 timestamp value.
+        // Returning a value from the benchmark function, in coordination with `black_box()`,
+        // disallows the compiler from optimizing away inner logic.
+        // Returns `fn() -> u64` to enable selecting and running benchmark functions.
+        let fn_ptr = unsafe { OpaqueFnPtr::from_fn(f) };
+
+        #[inline]
+        fn ben<O>(fn_ptr: OpaqueFnPtr) -> u64 {
+            let ben: fn() -> O = unsafe { fn_ptr.to_fn() };
+            // Avoid compiler over-optimization of benchmark functions by using `black_box(f())`.
+            //  Explanation of how black_box works with LLVM ASM and memory.
+            //      https://github.com/rust-lang/rust/blob/6a944187fb917393c9c6c39825dec3c1de29787c/compiler/rustc_codegen_llvm/src/intrinsic.rs#L339
+            // `black_box` call from rust benchmark.
+            //      https://github.com/rust-lang/rust/blob/cb6ab9516bbbd3859b56dd23e32fe41600e0ae02/library/test/src/lib.rs#L628
+            // Record cpu cycles with assembly instructions.
+            // Return ellapsed cpu cycles.
+            let fst = fst_cpu_cyc();
+            black_box(ben());
+            lst_cpu_cyc() - fst
+        }
+
+        self.ben_blds
+            .push(BenBld::new(self.id, lbl, fn_ptr, ben::<O>));
+        self
+    }
+}
+impl<L> fmt::Debug for RegBld<L>
 where
     L: Label,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let lbls = self.ops.iter().fold(Vec::<String>::new(), |mut vec, x| {
-            vec.push(join(&x.lbls, None));
-            vec
-        });
-        f.debug_struct("Frm")
-            .field("lbls", &self.lbls)
-            .field("ops", &self.ops.len())
-            .field("ops.lbls", &lbls)
+        f.debug_struct("RegBld").field("lbls", &self.lbls).finish()
+    }
+}
+pub struct QryBld<L>
+where
+    L: Label,
+{
+    pub sel_blds: HashMap<u64, SelBld<L>>,
+    pub cmp_blds: Vec<CmpBld>,
+}
+impl<L> QryBld<L>
+where
+    L: Label,
+{
+    pub fn new() -> Self {
+        QryBld {
+            sel_blds: HashMap::new(),
+            cmp_blds: Vec::new(),
+        }
+    }
+    pub fn sel(&mut self, lbls: &[L]) -> u64 {
+        self.sel_sta(lbls, Mdn)
+    }
+    pub fn sel_sta(&mut self, lbls: &[L], sta: Sta) -> u64 {
+        let sel = SelBld::new(lbls, sta);
+        let sel_id = sel.id();
+        self.sel_blds.entry(sel_id).or_insert(sel);
+        sel_id
+    }
+    pub fn cmp(&mut self, a_sel_id: u64, b_sel_id: u64) {
+        let cmp = CmpBld::new(a_sel_id, b_sel_id);
+        self.cmp_blds.push(cmp);
+    }
+}
+impl<L> fmt::Debug for QryBld<L>
+where
+    L: Label,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("QryBld")
+            .field("sel_blds", &self.sel_blds.values())
+            .field("cmp_blds", &self.cmp_blds)
             .finish()
     }
 }
-
-// A benchmark measurement run.
-#[derive(Clone)]
-pub struct Run<L>
+#[derive(Debug)]
+pub struct SelBld<L>
 where
     L: Label,
 {
-    /// Benchmark results.
-    pub res: Vec<Dat<L>>,
-}
-impl<L> Run<L>
-where
-    L: Label,
-{
-    /// Returns a new run.
-    pub fn new(res: Vec<Dat<L>>) -> Self {
-        Run { res }
-    }
-
-    /// Group benchmark measurements.
-    ///
-    /// Each label is a group.
-    pub fn grp(&mut self, grp_lblss: &Vec<Vec<L>>, srt: &Option<L>) -> Result<Grps<L>>
-    where
-        L: Label,
-    {
-        // Create return object.
-        let mut ret = Vec::with_capacity(grp_lblss.len());
-
-        // Create a hashmap of the run results.
-        // Use the dat index as the id.
-        let mut dats: HashMap<u16, Dat<L>> = HashMap::new();
-
-        // Create a map of label to ids.
-        let mut ids: HashMap<L, HashSet<u16>> = HashMap::new();
-
-        // Populate hashmaps for later searching.
-        // for (n, dat) in self.res.iter().enumerate() {
-        for idx in (0..self.res.len()).rev() {
-            let id = idx as u16;
-
-            // Get and remove the dat from the run results.
-            let dat = self.res.remove(idx);
-
-            // Insert the dat id for each label.
-            for lbl in dat.lbls.iter() {
-                let lbl_ids = ids.entry(*lbl).or_insert(HashSet::new());
-                lbl_ids.insert(id);
-            }
-
-            // Insert the id to dat.
-            dats.insert(id, dat);
-        }
-
-        // Create groups.
-        for grp_lbls in grp_lblss.iter() {
-            // Gather ids for group labels.
-            // Each label has a list of benchmark ids.
-            // Ensure each id is present in each label list.
-            let mut qry_lbl_ids: Vec<&HashSet<u16>> = Vec::new();
-            for lbl in grp_lbls.iter() {
-                if let Some(lbl_ids) = ids.get(lbl) {
-                    qry_lbl_ids.push(lbl_ids);
-                }
-            }
-
-            // Notify queried label doesn't exist in Frm query.
-            if qry_lbl_ids.is_empty() {
-                bail!(
-                    "empty group: label '{}' didn't produce a group",
-                    join(grp_lbls, Some('-'))
-                );
-            }
-
-            // Gather matched benchmark ids.
-            // Intersect the id across each list for a match.
-            // Find which benchmark ids are within each label list.
-            let mut matched_ids: Vec<u16> = Vec::new();
-            let mut matching_lbl_set = qry_lbl_ids[0].clone();
-            for qry_lbl_set in qry_lbl_ids.into_iter().skip(1) {
-                matching_lbl_set = &matching_lbl_set & qry_lbl_set;
-            }
-            matched_ids.extend(matching_lbl_set);
-
-            // Check whether there are any matching ids.
-            if matched_ids.is_empty() {
-                bail!(
-                    "empty group: label '{}' didn't produce a group",
-                    join(grp_lbls, Some('-'))
-                );
-            }
-
-            // Gather group of dats from the matched ids.
-            let mut grp_dats: Vec<Dat<L>> = Vec::new();
-            for matched_id in matched_ids {
-                if let Some(matched_dat) = dats.get(&matched_id) {
-                    // Clone dat.
-                    // Dat may be shared by multiple groups.
-                    grp_dats.push(matched_dat.clone());
-                }
-            }
-
-            // Check whether group dats is empty.
-            if grp_dats.is_empty() {
-                bail!(
-                    "empty group: label '{}' didn't produce a group",
-                    join(grp_lbls, Some('-'))
-                );
-            }
-
-            // Sort group.
-            if let Some(srt_lbl) = srt {
-                grp_dats.sort_unstable_by_key(|dat| {
-                    let o_lbl = dat
-                        .lbls
-                        .iter()
-                        .find(|x| mem::discriminant(*x) == mem::discriminant(srt_lbl));
-                    if let Some(lbl) = o_lbl {
-                        *lbl
-                    } else {
-                        L::default()
-                    }
-                });
-            }
-
-            // Add a group.
-            ret.push(Grp::new(grp_lbls, grp_dats));
-        }
-
-        Ok(Grps(ret))
-    }
-}
-impl<L> fmt::Debug for Run<L>
-where
-    L: Label,
-{
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Run").field("res", &self.res.len()).finish()
-    }
-}
-impl<L> fmt::Display for Run<L>
-where
-    L: Label,
-{
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut tbl = Table::new();
-        tbl.load_preset(UTF8_FULL);
-        for dat in self.res.iter() {
-            let mut row = Vec::<String>::with_capacity(1 + dat.vals.len());
-            row.push(join(&dat.lbls, None));
-            for val in dat.vals.iter() {
-                row.push(fmt_num(val));
-            }
-            tbl.add_row(row);
-        }
-        f.write_fmt(format_args!("{tbl}"))
-    }
-}
-
-#[repr(u8)]
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
-
-/// Statisitcal functions for benchmark results.
-pub enum Stat {
-    /// Median of the benchmark results.
-    #[default]
-    Mdn,
-    /// Minimum of the benchmark results.
-    Min,
-    /// Maximum of the benchmark results.
-    Max,
-    /// Average of the benchmark results.
-    Avg,
-    /// Raw benchmarks with no statisitcal functions applied.
-    Raw,
-}
-
-// A group of benchmark results.
-#[derive(Clone)]
-pub struct Grp<L>
-where
-    L: Label,
-{
-    /// Labels for the group.
     pub lbls: Vec<L>,
-    /// Benchmark results.
-    pub dats: Vec<Dat<L>>,
+    pub sta: Sta,
 }
-impl<L> Grp<L>
+impl<L> SelBld<L>
 where
     L: Label,
 {
-    /// Returns a new group.
-    pub fn new(lbls: &[L], dats: Vec<Dat<L>>) -> Self {
-        Grp {
+    pub fn new(lbls: &[L], sta: Sta) -> Self {
+        SelBld {
             lbls: unq_srt(lbls),
-            dats,
+            sta,
         }
     }
+    /// Hash id for selection `labels` and `statistic`.
+    pub fn id(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        for lbl in self.lbls.iter() {
+            lbl.hash(&mut h);
+        }
+        self.sta.hash(&mut h);
+        h.finish()
+    }
+    /// Hash id for selection `labels`.
+    pub fn reg_id(&self) -> u64 {
+        let mut h = DefaultHasher::new();
+        for lbl in self.lbls.iter() {
+            lbl.hash(&mut h);
+        }
+        h.finish()
+    }
 }
-impl<L> fmt::Debug for Grp<L>
+#[derive(Debug)]
+pub struct CmpBld {
+    pub a_sel_id: u64,
+    pub b_sel_id: u64,
+}
+impl CmpBld {
+    pub fn new(a_sel_id: u64, b_sel_id: u64) -> Self {
+        CmpBld { a_sel_id, b_sel_id }
+    }
+}
+pub struct BenBld<L>
+where
+    L: Label,
+{
+    pub reg_id: u64,
+    pub lbl: L,
+    pub fn_ptr: OpaqueFnPtr,
+    pub f: fn(OpaqueFnPtr) -> u64,
+}
+impl<L> BenBld<L>
+where
+    L: Label,
+{
+    pub fn new(reg_id: u64, lbl: L, fn_ptr: OpaqueFnPtr, f: fn(OpaqueFnPtr) -> u64) -> Self {
+        BenBld {
+            reg_id,
+            lbl,
+            fn_ptr,
+            f,
+        }
+    }
+    #[inline]
+    pub fn run(&self) -> u64 {
+        (self.f)(self.fn_ptr)
+    }
+}
+impl<L> fmt::Debug for BenBld<L>
 where
     L: Label,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Grp")
-            .field("lbls", &self.lbls)
-            .field("dats", &self.dats.len())
+        f.debug_struct("Ben")
+            // .field("reg_id", &self.reg_id)
+            .field("lbls", &self.lbl)
             .finish()
     }
 }
-impl<L> fmt::Display for Grp<L>
+
+#[derive(Debug)]
+pub struct Qry<L>
 where
     L: Label,
 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut tbl = Table::new();
-        tbl.load_preset(UTF8_FULL);
-        for dat in self.dats.iter() {
-            let mut row = Vec::<String>::with_capacity(1 + dat.vals.len());
-            row.push(join(&dat.lbls, None));
-            for val in dat.vals.iter() {
-                row.push(fmt_num(val));
-            }
-            tbl.add_row(row);
-        }
-        f.write_fmt(format_args!("{tbl}"))
-    }
+    // pub sels: HashMap<u64, SelBld<L>>,
+    pub phn: PhantomData<L>,
 }
-
-// A list of benchmark result groups.
-#[derive(Debug, Clone)]
-pub struct Grps<L>(Vec<Grp<L>>)
-where
-    L: Label;
-
-impl<L> Grps<L>
+impl<L> Qry<L>
 where
     L: Label,
 {
-    // Transpose groups to series with the specified transpose label.
-    pub fn ser(&self, trn: L) -> Result<Sers> {
-        let mut sers = Vec::<Ser>::with_capacity(1 + self.0.len());
-
-        // Iterate through each group.
-        for grp in self.0.iter() {
-            // dbg.then(|| println!("group ser:{:?}", join(&grp.lbls, None)));
-            // dbg.then(|| println!("group ser:{:?}", join(&grp.dats[0].lbls, None)));
-            // dbg.then(|| println!("group ser:{:?}", &grp.dats));
-            // dbg.then(|| println!("---"));
-
-            // Create label series from first group.
-            if sers.is_empty() {
-                let mut trn_vals = Vec::with_capacity(grp.dats.len());
-                for dat in grp.dats.iter() {
-                    match find(&dat.lbls, trn) {
-                        None => {
-                            bail!(
-                                "group transpose: group '{}' has data which is missing transpose label '{:#}'",
-                                join(&grp.lbls, None),
-                                trn
-                            );
-                        }
-                        Some(lbl) => {
-                            trn_vals.push(lbl.val()? as u64);
-                        }
-                    }
-                }
-                sers.push(Ser::new(format!("{:#}", trn), trn_vals));
-            }
-
-            // Transpose one column to one row.
-            let mut vals = Vec::with_capacity(self.0.len());
-            for dat in grp.dats.iter() {
-                // Validate that only one column exists for the transpose.
-                if dat.vals.len().eq(&0) {
-                    bail!(
-                        "group transpose: no rows (expect:1, actual:{})",
-                        dat.vals.len()
-                    );
-                }
-                if dat.vals.len().gt(&1) {
-                    bail!(
-                        "group transpose: too many rows (expect:1, actual:{})",
-                        dat.vals.len()
-                    );
-                }
-                vals.push(dat.vals[0]);
-            }
-            let name = join(&clone_except(&grp.dats[0].lbls, trn), None);
-            sers.push(Ser::new(name, vals));
-        }
-
-        // Ensure at least one series exists.
-        if sers.is_empty() {
-            bail!("empty series: group transpose didn't produce any series");
-        }
-
-        // Ensure series have equal lengths.
-        if sers.len() > 1 {
-            let fst_vals_len = sers[0].vals.len();
-            for cur in sers.iter().skip(1) {
-                if cur.vals.len() != fst_vals_len {
-                    bail!(
-                        "uneven series lengths: ('{}' len:{}, '{}' len:{})",
-                        cur.name,
-                        cur.vals.len(),
-                        sers[0].name,
-                        fst_vals_len,
-                    );
-                }
-            }
-        }
-
-        Ok(Sers(sers))
+    pub fn new() -> Self {
+        Qry { phn: PhantomData }
     }
 }
-impl<L> fmt::Display for Grps<L>
+#[derive(Debug)]
+pub struct Reg<L>
 where
     L: Label,
 {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for grp in self.0.iter() {
-            f.write_fmt(format_args!("{}\n", grp))?;
-        }
-        Ok(())
-    }
-}
-
-// A list of benchmark result series.
-#[derive(Debug, Clone)]
-pub struct Sers(Vec<Ser>);
-impl Sers {
-    /// Compares pairs of series.
-    pub fn cmp(&self) -> Result<Cmps> {
-        // Check whether there are enough series to compare.
-        // First index is a header row, and isn't comparable.
-        if self.0.len() == 2 {
-            // Notify that one series cannot be compared.
-            bail!("series comparison: only one series");
-        }
-
-        // Compare all combinations of series.
-        let cmp_len = (1..self.0.len()).combinations(2).count();
-        let mut cmps: Vec<Cmp> = Vec::with_capacity(cmp_len);
-        for idxs in (1..self.0.len()).combinations(2) {
-            cmps.push(self.cmp_pair(idxs[0], idxs[1]));
-        }
-
-        Ok(Cmps(cmps))
-    }
-
-    /// Compares a pair of series as a ratio of max/min.
-    fn cmp_pair(&self, idx_a: usize, idx_b: usize) -> Cmp {
-        let mut rows: Vec<Vec<Cell>> = Vec::with_capacity(4);
-
-        // Add header row
-        let mut h_cells: Vec<Cell> = self.0[0].vals.iter().map(Cell::new).collect();
-        h_cells.insert(0, Cell::new(self.0[0].name.clone()));
-        rows.push(h_cells);
-
-        // Clone series 'a' and series 'b'.
-        let a = self.0[idx_a].clone();
-        let b = self.0[idx_b].clone();
-
-        // Calculate the ratio of values at each index.
-        // Determine the display formatting at the same time.
-        // Lower times are better.
-        let clr_best = Color::Green;
-        let len = a.vals.len().min(b.vals.len());
-        let mut a_cells: Vec<Cell> = Vec::with_capacity(1 + len);
-        let mut b_cells: Vec<Cell> = Vec::with_capacity(1 + len);
-        let mut c_cells: Vec<Cell> = Vec::with_capacity(1 + len);
-        let mut a_best_cnt: u16 = 0;
-        let mut b_best_cnt: u16 = 0;
-        for n in 0..len {
-            let mut min: f32;
-            let max: f32;
-            if a.vals[n] < b.vals[n] {
-                min = a.vals[n] as f32;
-                max = b.vals[n] as f32;
-                a_cells.push(Cell::new(fmt_num(a.vals[n])).fg(clr_best));
-                b_cells.push(Cell::new(fmt_num(b.vals[n])));
-                a_best_cnt += 1;
-            } else {
-                min = b.vals[n] as f32;
-                max = a.vals[n] as f32;
-                if b.vals[n] < a.vals[n] {
-                    a_cells.push(Cell::new(fmt_num(a.vals[n])));
-                    b_cells.push(Cell::new(fmt_num(b.vals[n])).fg(clr_best));
-                    b_best_cnt += 1;
-                } else {
-                    a_cells.push(Cell::new(fmt_num(a.vals[n])).fg(clr_best));
-                    b_cells.push(Cell::new(fmt_num(b.vals[n])).fg(clr_best));
-                    a_best_cnt += 1;
-                    b_best_cnt += 1;
-                }
-            }
-            min = min.max(1.0);
-            let ratio = max.div(min);
-            c_cells.push(Cell::new(fmt_f32(ratio)));
-        }
-
-        // Colorized series with the most best counts.
-        // Larger is better.
-        #[allow(clippy::comparison_chain)]
-        if a_best_cnt == b_best_cnt {
-            a_cells.insert(0, Cell::new(a.name).fg(clr_best));
-            b_cells.insert(0, Cell::new(b.name).fg(clr_best));
-        } else if a_best_cnt > b_best_cnt {
-            a_cells.insert(0, Cell::new(a.name).fg(clr_best));
-            b_cells.insert(0, Cell::new(b.name));
-        } else {
-            a_cells.insert(0, Cell::new(a.name));
-            b_cells.insert(0, Cell::new(b.name).fg(clr_best));
-        }
-        c_cells.insert(0, Cell::new("ratio (max / min)"));
-
-        rows.push(a_cells);
-        rows.push(b_cells);
-        rows.push(c_cells);
-
-        Cmp(rows)
-    }
-}
-impl fmt::Display for Sers {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut tbl = Table::new();
-        tbl.load_preset(UTF8_FULL);
-        for (n, ser) in self.0.iter().enumerate() {
-            let mut row = Vec::<String>::with_capacity(1 + ser.vals.len());
-            row.push(ser.name.clone());
-            for val in ser.vals.iter() {
-                row.push(fmt_num(val));
-            }
-            if n == 0 {
-                tbl.set_header(row);
-            } else {
-                tbl.add_row(row);
-            }
-        }
-        f.write_fmt(format_args!("{}", tbl))
-    }
-}
-
-// A series of data.
-#[derive(Debug, Clone)]
-pub struct Ser {
-    /// Name of the series.
-    pub name: String,
-    /// Values for the series.
-    pub vals: Vec<u64>,
-}
-impl Ser {
-    /// Returns a new series.
-    pub fn new(name: String, vals: Vec<u64>) -> Self {
-        Ser { name, vals }
-    }
-}
-
-// A comparison of two series.
-#[derive(Debug, Clone)]
-pub struct Cmp(Vec<Vec<Cell>>);
-impl fmt::Display for Cmp {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let mut tbl = Table::new();
-        tbl.load_preset(UTF8_FULL);
-        for (n, cells) in self.0.iter().enumerate() {
-            if n == 0 {
-                tbl.set_header(Row::from(cells.clone()));
-            } else {
-                tbl.add_row(Row::from(cells.clone()));
-            }
-        }
-        f.write_fmt(format_args!("{}", tbl))
-    }
-}
-
-// A list of comparisons.
-#[derive(Debug, Clone)]
-pub struct Cmps(Vec<Cmp>);
-impl fmt::Display for Cmps {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        for cmp in self.0.iter() {
-            f.write_fmt(format_args!("{}\n", cmp))?;
-        }
-        Ok(())
-    }
-}
-
-/// Results of a benchmark function run.
-#[derive(Debug, Clone)]
-pub struct Dat<L>
-where
-    L: Label,
-{
-    /// Labels associated with the benchmark.
     pub lbls: Vec<L>,
-    /// Values of a benchmark function run.
-    pub vals: Vec<u64>,
+    pub bens: Vec<Ben<L>>,
 }
-impl<L> Dat<L>
+impl<L> Reg<L>
 where
     L: Label,
 {
-    /// Returns a new Dat.
-    pub fn new(lbls: &[L], vals: Vec<u64>) -> Self {
-        Dat {
+    pub fn new(lbls: &[L]) -> Self {
+        Reg {
             lbls: lbls.to_vec(),
+            bens: Vec::new(),
+        }
+    }
+}
+#[derive(Debug)]
+pub struct Ben<L>
+where
+    L: Label,
+{
+    pub lbl: L,
+    pub vals: Vec<u64>,
+}
+impl<L> Ben<L>
+where
+    L: Label,
+{
+    pub fn new(lbl: L, vals: Vec<u64>) -> Self {
+        Ben { lbl, vals }
+    }
+}
+#[derive(Debug)]
+pub struct Sel<L>
+where
+    L: Label,
+{
+    pub lbls: Vec<L>,
+    pub sta: Sta,
+    pub vals: Vec<StaVal<L>>,
+}
+
+impl<L> Sel<L>
+where
+    L: Label,
+{
+    pub fn new(lbls: &[L], sta: Sta, vals: Vec<StaVal<L>>) -> Self {
+        Sel {
+            lbls: lbls.to_vec(),
+            sta,
             vals,
         }
     }
 }
-
-/// A benchmark function with labels.
-#[derive(Clone)]
-pub struct Op<L>
-where
-    L: Label,
-{
-    /// Labels associated with the benchmark.
-    pub lbls: Vec<L>,
-    /// A benchmark function.
-    pub fnc: Rc<RefCell<dyn FnMut() -> u64>>,
-}
-impl<L> Op<L>
-where
-    L: Label,
-{
-    /// Returns a new `Op`.
-    pub fn new(lbls: &[L], fnc: Rc<RefCell<dyn FnMut() -> u64>>) -> Self {
-        Op {
-            lbls: unq_srt(lbls),
-            fnc,
-        }
-    }
-}
-
-/// A section of a study.
-///
-/// Convenient for appending redundant labels.
 #[derive(Debug)]
-pub struct Sec<'stdy, L>
+pub struct Cmp<L>
 where
     L: Label,
 {
-    /// Labels for the section.
-    pub lbls: Vec<L>,
-    /// The parent stdy.
-    pub stdy: Rc<RefCell<&'stdy Stdy<L>>>,
+    pub hdr_lbls: Vec<L>,
+    pub a_lbls: Vec<L>,
+    pub b_lbls: Vec<L>,
+    pub a_vals: Vec<u64>,
+    pub b_vals: Vec<u64>,
+    pub ratios: Vec<f32>,
 }
-impl<'stdy, L> Sec<'stdy, L>
+impl<L> Cmp<L>
 where
     L: Label,
 {
-    /// Returns a new section.
-    pub fn new(lbls: &[L], stdy: Rc<RefCell<&'stdy Stdy<L>>>) -> Self {
-        Sec {
-            lbls: unq_srt(lbls),
-            stdy,
+    pub fn new(
+        hdr_lbls: Vec<L>,
+        a_lbls: Vec<L>,
+        b_lbls: Vec<L>,
+        a_vals: Vec<u64>,
+        b_vals: Vec<u64>,
+        ratios: Vec<f32>,
+    ) -> Self {
+        Cmp {
+            hdr_lbls,
+            a_lbls,
+            b_lbls,
+            a_vals,
+            b_vals,
+            ratios,
         }
     }
+}
 
-    /// Insert a benchmark function with the section's labels.
-    pub fn ins<F, O>(&self, lbls: &[L], f: F) -> Result<()>
-    where
-        F: FnMut() -> O,
-        F: 'static,
-    {
-        // Add section labels.
-        let all_lbls = mrg_unq_srt(&self.lbls, lbls);
-
-        // Insert a benchmark function.
-        self.stdy.borrow().ins(&all_lbls, f)
+/// A statisitcal value derived from a raw benchmark result.
+#[derive(Debug, Clone)]
+pub struct StaVal<L>
+where
+    L: Label,
+{
+    /// Benchmark labels.
+    ///
+    /// These may be different from selection labels.
+    ///
+    /// Benchmark labels may have more labels than selection labels.
+    lbl: L,
+    /// A benchmark value returned from a statistical function.
+    val: u64,
+}
+impl<L> StaVal<L>
+where
+    L: Label,
+{
+    /// Returns a new statisitcal value.
+    pub fn new(lbl: L, val: u64) -> Self {
+        StaVal { lbl, val }
     }
+}
 
-    /// Insert a benchmark function, which is manually timed,
-    /// with the section's labels.
-    pub fn ins_prm<F, O>(&self, lbls: &[L], f: F) -> Result<()>
-    where
-        F: FnMut(Rc<RefCell<Tme>>) -> O,
-        F: 'static,
-    {
-        // Add section labels.
-        let all_lbls = mrg_unq_srt(&self.lbls, lbls);
-
-        // Insert a benchmark function.
-        self.stdy.borrow().ins_prm(&all_lbls, f)
-    }
+/// A statistical function selecting a single value from raw benchmark results.
+#[repr(u8)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Default)]
+pub enum Sta {
+    /// Median benchmark value.
+    #[default]
+    Mdn,
+    /// Minimum benchmark value.
+    Min,
+    /// Maximum benchmark value.
+    Max,
+    /// Average benchmark value.
+    Avg,
 }
 
 /// A label used to aggregate, filter, and sort benchmark functions.
 pub trait Label:
-    Debug + Copy + Eq + PartialEq + Ord + PartialOrd + Hash + Default + Display + EnumStructVal
+    Debug + Copy + Eq + PartialEq + Ord + PartialOrd + Hash + Display + EnumStructVal + Send + 'static
 {
 }
 
@@ -1015,13 +603,6 @@ pub trait EnumStructVal {
 }
 
 /// Measures the ellapsed time of processor instructions.
-///
-/// # Examples
-/// ```
-/// t.start();
-/// // your benchmark code
-/// t.stop();
-/// ```
 pub struct Tme(pub u64);
 impl Tme {
     /// Starts the processor timer.
@@ -1089,6 +670,91 @@ pub fn overhead_cpu_cyc() -> u64 {
     overhead
 }
 
+/// Returns a unique and sorted list of labels.
+pub fn unq_srt<L>(lbls: &[L]) -> Vec<L>
+where
+    L: Label,
+{
+    let mut ret = lbls.to_vec();
+
+    // Deduplicate labels.
+    ret.dedup();
+
+    // Sort labels.
+    ret.sort_unstable();
+
+    ret
+}
+
+/// Merges and returns a unique and sorted list of labels.
+pub fn mrg_unq_srt<L>(a: &[L], b: &[L]) -> Vec<L>
+where
+    L: Label,
+{
+    let mut ret = a.to_vec();
+
+    // Merge lists of labels.
+    ret.extend(b);
+
+    // Deduplicate labels.
+    ret.dedup();
+
+    // Sort labels.
+    ret.sort_unstable();
+
+    ret
+}
+
+/// Finds a matching label.
+///
+/// Useful for struct labels, e.g. Len(u32).
+pub fn clone_except<L>(lbls: &[L], l: L) -> Vec<L>
+where
+    L: Label,
+{
+    let mut ret = lbls.to_vec();
+    let len = ret.len();
+    for n in 0..len {
+        if mem::discriminant(&l) == mem::discriminant(&ret[n]) {
+            ret.remove(n);
+            break;
+        }
+    }
+    ret
+}
+
+/// Finds a matching label.
+///
+/// Useful for struct labels, e.g. Len(u32).
+pub fn find<L>(lbls: &[L], l: L) -> Option<L>
+where
+    L: Label,
+{
+    for cur in lbls.iter() {
+        if mem::discriminant(&l) == mem::discriminant(cur) {
+            return Some(*cur);
+        }
+    }
+    None
+}
+
+/// Join labels into one string with a separator.
+pub fn join<L>(lbls: &Vec<L>, sep: char) -> String
+where
+    L: Label,
+{
+    lbls.iter().enumerate().fold(
+        String::with_capacity(lbls.len() * 8),
+        |mut str, (n, lbl)| {
+            str.push_str(lbl.to_string().as_str());
+            if n != lbls.len() - 1 {
+                str.push(sep);
+            }
+            str
+        },
+    )
+}
+
 /// Formats a number with with commas.
 ///
 /// Supports unsigned integers, signed integers, and floating-points.
@@ -1123,7 +789,7 @@ where
     }
     s
 }
-
+// 1:32:00 -
 /// Returns a formatted f32 rounded to one decimal place.
 ///
 /// Decimal place is removed if the value is greater than or equal to 10.0;
@@ -1139,88 +805,6 @@ pub fn fmt_f32(v: f32) -> String {
     fmt_num(s)
 }
 
-/// Finds a matching label.
-///
-/// Useful for struct labels, e.g. Len(u32).
-pub fn find<L>(lbls: &[L], l: L) -> Option<L>
-where
-    L: Label,
-{
-    for cur in lbls.iter() {
-        if mem::discriminant(&l) == mem::discriminant(cur) {
-            return Some(*cur);
-        }
-    }
-    None
-}
-
-/// Join labels into one string with a separator.
-pub fn join<L>(lbls: &Vec<L>, mut sep: Option<char>) -> String
-where
-    L: Label,
-{
-    let sep = sep.get_or_insert(',');
-    lbls.iter().enumerate().fold(
-        String::with_capacity(lbls.len() * 8),
-        |mut str, (n, lbl)| {
-            str.push_str(lbl.to_string().as_str());
-            if n != lbls.len() - 1 {
-                str.push(*sep);
-            }
-            str
-        },
-    )
-}
-
-/// Finds a matching label.
-///
-/// Useful for struct labels, e.g. Len(u32).
-pub fn clone_except<L>(lbls: &[L], l: L) -> Vec<L>
-where
-    L: Label,
-{
-    let mut ret = lbls.to_vec();
-    let len = ret.len();
-    for n in 0..len {
-        if mem::discriminant(&l) == mem::discriminant(&ret[n]) {
-            ret.remove(n);
-            break;
-        }
-    }
-    ret
-}
-
-/// Returns a unique and sorted list of labels.
-pub fn unq_srt<L>(lbls: &[L]) -> Vec<L>
-where
-    L: Label,
-{
-    let mut ret = lbls.to_vec();
-
-    // Deduplicate labels.
-    ret.dedup();
-
-    // Sort labels.
-    ret.sort_unstable();
-
-    ret
-}
-
-/// Merges and returns a unique and sorted list of labels.
-pub fn mrg_unq_srt<L>(a: &[L], b: &[L]) -> Vec<L>
-where
-    L: Label,
-{
-    let mut ret = a.to_vec();
-
-    // Merge lists of labels.
-    ret.extend(b);
-
-    // Deduplicate labels.
-    ret.dedup();
-
-    // Sort labels.
-    ret.sort_unstable();
-
-    ret
+pub fn f32_pnt_one(v: f32) -> f32 {
+    format!("{:.1}", v).parse::<f32>().unwrap()
 }
